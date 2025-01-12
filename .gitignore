@@ -1,0 +1,18 @@
+# Build artifacts
+zig-out
+.zig-cache
+
+# Editor
+*.swp
+*.swo
+.idea
+
+# Temp files
+*.tmp
+*.bak
+*.log
+/tmp
+/log
+
+# Misc
+.DS_Store

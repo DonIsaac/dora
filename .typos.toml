@@ -1,0 +1,4 @@
+# https://github.com/crate-ci/typos
+[type.zig]
+extend-glob = ["*.zig", "*.zog"]
+check-file = true
