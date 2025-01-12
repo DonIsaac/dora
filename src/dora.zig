@@ -1,3 +1,10 @@
+pub fn AutoDora(
+    comptime K: type,
+    comptime V: type,
+) type {
+    return Dora(K, V, std.hash_map.AutoContext(K), std.hash_map.default_max_load_percentage);
+}
+
 /// ## Contexts
 /// Context has the following interface:
 /// ```zig
@@ -33,7 +40,7 @@ pub fn Dora(
         // not using slice to save a word
         shards: [*]align(cache_line) Shard,
         shard_count: u32,
-        shift: u32,
+        shift: u6,
         allocator: Allocator,
 
         const Self = @This();
@@ -43,9 +50,52 @@ pub fn Dora(
         const Bucket = std.HashMapUnmanaged(Hash, V, IdentityContext, max_load_percentage);
         const Shard = struct {
             bucket: Bucket = .{},
-            lock: RwLock = .{},
-            inline fn unlock(self: *@This()) void {
-                self.lock.unlock();
+            _lock: RwLock = .{},
+            _state: DebugState = if (is_safe) .unlocked else {},
+            const is_safe = std.debug.runtime_safety;
+
+            const DebugState = if (!is_safe) void else union(enum) {
+                unlocked: void,
+                locked: struct { state: util.RW, owner: u64 },
+            };
+
+            pub inline fn lock(self: *Shard, comptime ty: util.RW) void {
+                if (comptime ty == .write) {
+                    self._lock.lock();
+                } else {
+                    self._lock.lockShared();
+                }
+                if (is_safe) {
+                    assert(self._state == .unlocked);
+                    self._state = .{
+                        .locked = .{ .owner = std.Thread.getCurrentId(), .state = ty },
+                    };
+                }
+            }
+
+            pub inline fn unlock(self: *@This()) void {
+                self._lock.unlock();
+                if (is_safe) {
+                    assert(self._state == .locked);
+                    assert(self._state.locked.owner == std.Thread.getCurrentId());
+                    self._state = .unlocked;
+                }
+            }
+
+            inline fn assertCurrentThreadWritable(self: *Shard) void {
+                if (is_safe) {
+                    assert(self._state == .locked);
+                    assert(self._state.locked.state == .write);
+                    assert(self._state.locked.owner == std.Thread.getCurrentId());
+                }
+            }
+
+            inline fn assertCurrentThreadReadable(self: *Shard) void {
+                if (is_safe) {
+                    assert(self._state == .locked);
+                    assert(self._state.locked.state == .read);
+                    assert(self._state.locked.owner == std.Thread.getCurrentId());
+                }
             }
         };
 
@@ -63,9 +113,10 @@ pub fn Dora(
             shard_amount: u32,
         ) Allocator.Error!Self {
             assert(shard_amount > 1);
-            assert(util.num.isPowerOfTwo(shard_amount));
+            assert(util.isPowerOfTwo(shard_amount));
 
-            const shift = @as(u32, util.num.ptrSizeBits) - @ctz(shard_amount);
+            const shift = @as(u32, util.ptrSizeBits) - @ctz(shard_amount);
+
             const actual_capacity = if (capacity != 0)
                 (capacity + (shard_amount - 1)) & ~(shard_amount - 1)
             else
@@ -85,60 +136,105 @@ pub fn Dora(
             return Self{
                 .shards = @ptrCast(shards),
                 .shard_count = shard_amount,
-                .shift = shift,
+                .shift = @intCast(shift),
                 .allocator = allocator,
             };
         }
 
+        pub fn get(self: *Self, key: K) ?Ref {
+            const hash, var shard = self.lock(key, .read);
+            if (shard.bucket.getPtr(hash)) |value| {
+                return Ref{ .value = value, .shard = shard };
+            } else {
+                shard.unlock();
+                return null;
+            }
+        }
+
+        pub fn getCopy(self: *Self, key: K) ?V {
+            const hash, var shard = self.lock(key, .read);
+            defer shard.unlock();
+            return shard.bucket.get(hash);
+        }
+
         pub fn entry(self: *Self, key: K) ?Bucket.Entry {
-            const hash, var shard = self.lockMut(key);
+            const hash, var shard = self.lock(key, .write);
             return shard.bucket.getEntry(hash) orelse empty: {
                 shard.unlock();
                 break :empty null;
             };
         }
 
+        pub fn sizeSlow(self: *Self) usize {
+            var size: usize = 0;
+            for (self.getShards()) |*shard| {
+                shard.lock(.read);
+                defer shard.unlock();
+                size += shard.bucket.size;
+            }
+            return size;
+        }
+
         /// add a new entry. Asserts no entry exists under `key`.
         pub fn insert(self: *Self, key: K, value: V) Allocator.Error!void {
-            const hash, var shard = self.lockMut(key);
+            const hash, var shard = self.lock(key, .write);
+            shard.assertCurrentThreadWritable();
+            // assert(shard.)
             defer shard.unlock();
             try shard.bucket.putNoClobber(self.allocator, hash, value);
         }
 
+        pub fn put(self: *Self, key: K, value: V) Allocator.Error!?V {
+            const hash, var shard = self.lock(key, .write);
+            defer shard.unlock();
+            const old: ?V = if (shard.bucket.get(hash)) |v| v else null;
+            try shard.bucket.put(self.allocator, hash, value);
+            return old;
+        }
+
         pub fn delete(self: *Self, key: K) bool {
-            const hash, var shard = self.lockMut(key);
-            defer shard.lock.unlock();
+            const hash, var shard = self.lock(key, .write);
+            defer shard.unlock();
             const ent = shard.bucket.getEntry(hash) orelse return false;
-            if (@hasDecl(Context, "deinit")) {
-                Context.deinit(ent.value);
-            }
+            deinitValue(ent.value_ptr);
+
             shard.bucket.removeByPtr(ent.key_ptr);
             return true;
         }
 
-        /// Hash a key and lock the related shard for read-only access.
-        /// You must unlock the shard after you are done with it.
-        fn lock(self: *Self, key: K) struct { Hash, *Shard } {
-            const hash = Context.hash(key);
-            if (@TypeOf(hash) != Hash) {
-                @compileError("Context " ++ @typeName(Context) ++ " has a generic hash function that returns the wrong type! " ++ @typeName(Hash) ++ " was expected, but found " ++ @typeName(@TypeOf(hash)));
+        inline fn deinitValue(value: *V) void {
+            if (comptime @hasDecl(Context, "deinit")) {
+                Context.deinit(value);
             }
-            const shard_idx = self.determineShard(hash);
-            var shard = &self.shards[shard_idx];
-            shard.lock.lockShared();
-            return .{ hash, shard };
         }
 
-        /// Hash a key and lock the related shard for read-write access.
+        pub fn deinit(self: *Self) void {
+            const c = self.shard_count;
+            var shards = self.shards[0..c];
+            _ = &shards;
+            for (shards) |*shard| {
+                shard.lock(.write);
+                if (@hasDecl(Context, "deinit")) {
+                    var iter = shard.bucket.valueIterator();
+                    while (iter.next()) |value| {
+                        Context.deinit(value);
+                    }
+                }
+                shard.bucket.deinit(self.allocator);
+            }
+            self.allocator.free(shards);
+        }
+
+        /// Hash a key and lock the related shard for read-only access.
         /// You must unlock the shard after you are done with it.
-        fn lockMut(self: *Self, key: K) struct { Hash, *Shard } {
-            const hash = Context.hash(key);
+        fn lock(self: *Self, key: K, comptime ty: util.RW) struct { Hash, *Shard } {
+            const hash = Context.hash(undefined, key);
             if (@TypeOf(hash) != Hash) {
                 @compileError("Context " ++ @typeName(Context) ++ " has a generic hash function that returns the wrong type! " ++ @typeName(Hash) ++ " was expected, but found " ++ @typeName(@TypeOf(hash)));
             }
             const shard_idx = self.determineShard(hash);
             var shard = &self.shards[shard_idx];
-            shard.lock.lock();
+            shard.lock(ty);
             return .{ hash, shard };
         }
 
@@ -147,39 +243,32 @@ pub fn Dora(
             return (hash << 7) >> self.shift;
         }
 
-        pub fn deinit(self: *Self) void {
-            const c = self.shard_count;
-            var shards = self.shards[0..c];
-            _ = &shards;
-            for (shards) |*shard| {
-                shard.lock.lock();
-                shard.bucket.deinit(self.allocator);
-            }
-            self.allocator.free(shards);
+        inline fn getShards(self: *Self) []Shard {
+            return self.shards[0..self.shard_count];
         }
 
         const Ref = struct {
             value: *const V,
-            lock: *RwLock,
+            shard: *Shard,
             pub fn release(self: *Ref) void {
-                self.lock.unlock();
+                self.shard.unlock();
             }
         };
 
         const RefMut = struct {
             value: *V,
-            lock: *RwLock,
+            shard: *Shard,
             pub fn release(self: *RefMut) void {
-                self.lock.unlock();
+                self.shard.unlock();
             }
         };
 
         const Entry = struct {
             key: *const K,
             value: *const V,
-            lock: *RwLock,
+            shard: *Shard,
             pub fn release(self: *Entry) void {
-                self.lock.unlock();
+                self.shard.unlock();
             }
         };
 
@@ -205,9 +294,13 @@ const IdentityContext = struct {
 
 fn defaultShardAmount() u32 {
     const Static = struct {
+        const b = @import("builtin");
         fn doCalculateDefaultShardAmount() void {
-            const nthreads = std.Thread.getCpuCount() catch 1;
-            amount = util.num.nextPowerOfTwo(u32, @truncate(nthreads * 4));
+            const nthreads = if (b.single_threaded)
+                1
+            else
+                std.Thread.getCpuCount() catch 1;
+            amount = util.nextPowerOfTwo(u32, @truncate(nthreads * 4));
         }
         var amount: u32 = 0;
         var calculateDefaultShardAmount = std.once(doCalculateDefaultShardAmount);
@@ -219,17 +312,41 @@ fn defaultShardAmount() u32 {
 }
 
 const std = @import("std");
-const util = @import("util");
+const util = @import("util.zig");
+const hash_map = std.hash_map;
 
 const Allocator = std.mem.Allocator;
 const RwLock = std.Thread.RwLock;
+const HashMapUnmanaged = @import("HashMapUnmanaged.zig").HashMapUnmanaged;
 
 const assert = std.debug.assert;
 const cache_line = std.atomic.cache_line;
 
 const t = std.testing;
+const expectEqual = t.expectEqual;
+
+test {
+    t.refAllDecls(AutoDora(u32, u32));
+}
+
 test Dora {
-    const Map = Dora(u32, u32, std.hash_map.AutoContext(u32), 75);
+    const Map = Dora(
+        u32,
+        u32,
+        std.hash_map.AutoContext(u32),
+        std.hash_map.default_max_load_percentage,
+    );
+
     var map = try Map.initCapacity(t.allocator, 16);
     defer map.deinit();
+
+    try expectEqual(null, map.get(1));
+    try map.insert(1, 2);
+    try expectEqual(1, map.sizeSlow());
+    {
+        var ref = map.get(1).?;
+        defer ref.release();
+        try expectEqual(2, ref.value.*);
+    }
+    try expectEqual(2, map.getCopy(1));
 }

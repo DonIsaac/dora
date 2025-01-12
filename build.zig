@@ -17,6 +17,7 @@ pub fn build(b: *std.Build) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
+    const single_threaded = b.option(bool, "single-threaded", "Only ever use one thread") orelse false;
 
     const lib = b.addStaticLibrary(.{
         .name = NAME,
@@ -25,6 +26,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .single_threaded = single_threaded,
     });
 
     // This declares intent for the library to be installed into the standard
@@ -37,6 +39,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .single_threaded = single_threaded,
     });
 
     // This declares intent for the executable to be installed into the
@@ -69,10 +72,14 @@ pub fn build(b: *std.Build) void {
 
     // Creates a step for unit testing. This only builds the test executable
     // but does not run it.
+    // TODO: TSAN linking is broken in 0.13 but fixed on main. Enable it when 0.14 releases.
+    // see: https://github.com/ziglang/zig/issues/15241
     const lib_unit_tests = b.addTest(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        // .sanitize_thread = true,
+        .single_threaded = single_threaded,
     });
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
@@ -81,6 +88,8 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        // .sanitize_thread = true,
+        .single_threaded = single_threaded,
     });
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
@@ -103,9 +112,9 @@ pub fn build(b: *std.Build) void {
             });
             check_step.dependOn(&check_test.step);
 
-            const addArtifact = comptime if (std.mem.endsWith(u8, source_file, "root.zig")) 
+            const addArtifact = comptime if (std.mem.endsWith(u8, source_file, "root.zig"))
                 std.Build.addStaticLibrary
-            else 
+            else
                 std.Build.addExecutable;
 
             const check_artifact = addArtifact(b, .{
@@ -115,7 +124,6 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             });
             check_step.dependOn(&check_artifact.step);
-            
         }
     }
 }
