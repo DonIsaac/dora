@@ -7,7 +7,6 @@ pub fn AutoDora(
     return Dora(K, V, std.hash_map.AutoContext(K), std.hash_map.default_max_load_percentage);
 }
 
-
 /// ## Contexts
 /// Context has the following interface:
 /// ```zig
