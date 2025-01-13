@@ -1,9 +1,12 @@
+const Hash = u64;
+
 pub fn AutoDora(
     comptime K: type,
     comptime V: type,
 ) type {
     return Dora(K, V, std.hash_map.AutoContext(K), std.hash_map.default_max_load_percentage);
 }
+
 
 /// ## Contexts
 /// Context has the following interface:
@@ -44,61 +47,6 @@ pub fn Dora(
         allocator: Allocator,
 
         const Self = @This();
-        const Hash = u64;
-        // our wrappers compute key hashes themselves. we just forward hashes to the
-        // underlying map
-        const Bucket = std.HashMapUnmanaged(Hash, V, IdentityContext, max_load_percentage);
-        const Shard = struct {
-            bucket: Bucket = .{},
-            _lock: RwLock = .{},
-            _state: DebugState = if (is_safe) .unlocked else {},
-            const is_safe = std.debug.runtime_safety;
-
-            const DebugState = if (!is_safe) void else union(enum) {
-                unlocked: void,
-                locked: struct { state: util.RW, owner: u64 },
-            };
-
-            pub inline fn lock(self: *Shard, comptime ty: util.RW) void {
-                if (comptime ty == .write) {
-                    self._lock.lock();
-                } else {
-                    self._lock.lockShared();
-                }
-                if (is_safe) {
-                    assert(self._state == .unlocked);
-                    self._state = .{
-                        .locked = .{ .owner = std.Thread.getCurrentId(), .state = ty },
-                    };
-                }
-            }
-
-            pub inline fn unlock(self: *@This()) void {
-                self._lock.unlock();
-                if (is_safe) {
-                    assert(self._state == .locked);
-                    assert(self._state.locked.owner == std.Thread.getCurrentId());
-                    self._state = .unlocked;
-                }
-            }
-
-            inline fn assertCurrentThreadWritable(self: *Shard) void {
-                if (is_safe) {
-                    assert(self._state == .locked);
-                    assert(self._state.locked.state == .write);
-                    assert(self._state.locked.owner == std.Thread.getCurrentId());
-                }
-            }
-
-            inline fn assertCurrentThreadReadable(self: *Shard) void {
-                if (is_safe) {
-                    assert(self._state == .locked);
-                    assert(self._state.locked.state == .read);
-                    assert(self._state.locked.owner == std.Thread.getCurrentId());
-                }
-            }
-        };
-
         pub fn init(allocator: Allocator) Allocator.Error!Self {
             return initCapacity(allocator, 0);
         }
@@ -247,6 +195,78 @@ pub fn Dora(
             return self.shards[0..self.shard_count];
         }
 
+        // our wrappers compute key hashes themselves. we just forward hashes to the
+        // underlying map
+        const Bucket = std.HashMapUnmanaged(Hash, V, IdentityContext, max_load_percentage);
+        /// Shards are a hash map protected by a rw lock.
+        ///
+        /// A key's hash determines which shard it belongs to. Operations on
+        /// keys that belong to different shards can be done concurrently.
+        const Shard = struct {
+            bucket: Bucket = .{},
+            _lock: RwLock = .{},
+            /// Is this shard locked, how, and by who? When multiple threads
+            /// are sharing a read lock, the last one to obtain it is recorded.
+            _state: DebugState = if (is_safe) .unlocked else {},
+            const is_safe = std.debug.runtime_safety or builtin.is_test;
+
+            /// This is a ZST in fast/smol release builds.
+            const DebugState = if (!is_safe) void else union(enum) {
+                unlocked: void,
+                locked: struct { state: util.RW, owner: u64 },
+            };
+
+            pub inline fn lock(self: *Shard, comptime ty: util.RW) void {
+                if (comptime ty == .write) {
+                    self._lock.lock();
+                } else {
+                    self._lock.lockShared();
+                }
+                if (is_safe) {
+                    assert(self._state == .unlocked);
+                    self._state = .{
+                        .locked = .{ .owner = std.Thread.getCurrentId(), .state = ty },
+                    };
+                }
+            }
+
+            pub inline fn unlock(self: *@This()) void {
+                self._lock.unlock();
+                if (is_safe) {
+                    assert(self._state == .locked);
+                    assert(self._state.locked.owner == std.Thread.getCurrentId());
+                    self._state = .unlocked;
+                }
+            }
+
+            inline fn assertCurrentThreadWritable(self: *Shard) void {
+                if (is_safe) {
+                    assert(self._state == .locked);
+                    assert(self._state.locked.state == .write);
+                    assert(self._state.locked.owner == std.Thread.getCurrentId());
+                }
+            }
+
+            inline fn assertCurrentThreadReadable(self: *Shard) void {
+                if (is_safe) {
+                    assert(self._state == .locked);
+                    assert(self._state.locked.state == .read);
+                    assert(self._state.locked.owner == std.Thread.getCurrentId());
+                }
+            }
+        };
+
+        // Dora pads shards to fit in a cache line so that reading/writing
+        // buckets does not evict other shards from the cache. If shards are to
+        // thicc it defeats that purposes.
+        comptime {
+            assert(@sizeOf(Shard) <= cache_line);
+        }
+
+        /// Read-only reference to a value in the map.
+        ///
+        /// ## Safety
+        /// Failure to call `.release()` _will_ result in a deadlock.
         const Ref = struct {
             value: *const V,
             shard: *Shard,
@@ -255,6 +275,10 @@ pub fn Dora(
             }
         };
 
+        /// A mutable reference to a value in the map.
+        ///
+        /// ## Safety
+        /// Failure to call `.release()` _will_ result in a deadlock.
         const RefMut = struct {
             value: *V,
             shard: *Shard,
@@ -263,6 +287,10 @@ pub fn Dora(
             }
         };
 
+        /// A read-only reference to a key-value pair in the map.
+        ///
+        /// ## Safety
+        /// Failure to call `.release()` _will_ result in a deadlock.
         const Entry = struct {
             key: *const K,
             value: *const V,
@@ -272,6 +300,10 @@ pub fn Dora(
             }
         };
 
+        /// A mutable reference to a key-value pair in the map.
+        ///
+        /// ## Safety
+        /// Failure to call `.release()` _will_ result in a deadlock.
         const EntryMut = struct {
             key: *const K,
             value: *V,
@@ -284,10 +316,10 @@ pub fn Dora(
 }
 
 const IdentityContext = struct {
-    pub fn hash(_: IdentityContext, key: u64) u64 {
+    pub fn hash(_: IdentityContext, key: Hash) Hash {
         return key;
     }
-    pub fn eql(_: IdentityContext, a: u64, b: u64) bool {
+    pub fn eql(_: IdentityContext, a: Hash, b: Hash) bool {
         return a == b;
     }
 };
@@ -312,6 +344,7 @@ fn defaultShardAmount() u32 {
 }
 
 const std = @import("std");
+const builtin = @import("builtin");
 const util = @import("util.zig");
 
 const Allocator = std.mem.Allocator;
