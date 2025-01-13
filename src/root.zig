@@ -1,5 +1,4 @@
 const std = @import("std");
-const testing = std.testing;
 const dora = @import("dora.zig");
 
 pub const Dora = dora.Dora;

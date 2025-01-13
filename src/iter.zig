@@ -1,6 +1,5 @@
 const std = @import("std");
 const util = @import("util.zig");
-const Dora = @import("dora.zig").Dora;
 const Allocator = std.mem.Allocator;
 const ThreadPool = std.Thread.Pool;
 
@@ -13,6 +12,7 @@ pub fn ParIter(TDora: type, Context: type, comptime ty: util.RW) type {
         const Self = @This();
 
         pub fn init(dora: *TDora, context: Context, allocator: Allocator) !Self {
+            // SAFETY: set by init
             var pool: ThreadPool = undefined;
             try ThreadPool.init(.{
                 .allocator = allocator,
@@ -67,7 +67,6 @@ test ParIter {
     var map = try Map.init(t.allocator);
     defer map.deinit();
 
-    var pool: std.Thread.Pool = undefined;
 
     for (0..100) |i| {
         const x: u32 = @intCast(i);
@@ -78,6 +77,8 @@ test ParIter {
 
     var ctx = Context{};
     {
+        // SAFETY: init sets a value here
+        var pool: std.Thread.Pool = undefined;
         try pool.init(.{ .allocator = t.allocator });
         defer pool.deinit();
         var iter = ParIter(Map, *Context, .read){

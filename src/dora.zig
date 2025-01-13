@@ -313,11 +313,9 @@ fn defaultShardAmount() u32 {
 
 const std = @import("std");
 const util = @import("util.zig");
-const hash_map = std.hash_map;
 
 const Allocator = std.mem.Allocator;
 const RwLock = std.Thread.RwLock;
-const HashMapUnmanaged = @import("HashMapUnmanaged.zig").HashMapUnmanaged;
 
 const assert = std.debug.assert;
 const cache_line = std.atomic.cache_line;
