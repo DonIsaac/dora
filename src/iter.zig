@@ -2,6 +2,7 @@ const std = @import("std");
 const util = @import("util.zig");
 const Allocator = std.mem.Allocator;
 const ThreadPool = std.Thread.Pool;
+const WaitGroup = std.Thread.WaitGroup;
 
 pub fn ParIter(TDora: type, Context: type, comptime ty: util.RW) type {
     return struct {
@@ -9,18 +10,20 @@ pub fn ParIter(TDora: type, Context: type, comptime ty: util.RW) type {
         does_own_pool: bool,
         dora: *TDora,
         context: Context,
+        wait_group: WaitGroup = .{},
+
         const Self = @This();
 
         pub fn init(dora: *TDora, context: Context, allocator: Allocator) !Self {
-            // SAFETY: set by init
-            var pool: ThreadPool = undefined;
-            try ThreadPool.init(.{
+            const pool = try allocator.create(ThreadPool);
+            errdefer allocator.destroy(pool);
+            try ThreadPool.init(pool, .{
                 .allocator = allocator,
                 .n_jobs = dora.shard_count,
             });
 
             return Self{
-                .pool = &pool,
+                .pool = pool,
                 .does_own_pool = true,
                 .dora = dora,
                 .context = context,
@@ -31,11 +34,20 @@ pub fn ParIter(TDora: type, Context: type, comptime ty: util.RW) type {
             var shards = self.dora.shards[0..self.dora.shard_count];
             _ = &shards;
             for (shards) |*shard| {
-                try self.pool.spawn(runOnShard, .{ self.context, shard });
+                self.pool.spawnWg(&self.wait_group, runOnShard, .{ self.context, shard });
+                // self.pool.spawn(&self.wait_group, runOnShard, .{ self.context, shard });
             }
         }
+
         pub fn deinit(self: *Self) void {
-            if (self.does_own_pool) self.pool.deinit();
+            // No point in waiting if we own the pool; joining the threads will
+            // do that for us.
+            self.wait_group.wait();
+            if (self.does_own_pool) {
+                const allocator = self.pool.allocator;
+                self.pool.deinit();
+                allocator.destroy(self.pool);
+            }
             self.* = undefined;
         }
 

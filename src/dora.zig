@@ -149,6 +149,24 @@ pub fn Dora(
             return true;
         }
 
+        pub fn parIter(
+            self: *Self,
+            comptime IterContext: type,
+            context: IterContext,
+            pool: ?*std.Thread.Pool,
+        ) !iters.ParIter(Self, IterContext, util.RW.read) {
+            if (pool) |p| {
+                return .{
+                    .pool = p,
+                    .does_own_pool = false,
+                    .dora = self,
+                    .context = context,
+                };
+            } else {
+                return iters.ParIter(Self, IterContext, .read).init(self, context, self.allocator);
+            }
+        }
+
         inline fn deinitValue(value: *V) void {
             if (comptime @hasDecl(Context, "deinit")) {
                 Context.deinit(value);
@@ -258,8 +276,12 @@ pub fn Dora(
         // Dora pads shards to fit in a cache line so that reading/writing
         // buckets does not evict other shards from the cache. If shards are to
         // thicc it defeats that purposes.
+        // Also, HashMap is _gigantic_ in test builds. Doesn't really matter, so
+        // we just skip the check.
         comptime {
-            assert(@sizeOf(Shard) <= cache_line);
+            if (!builtin.is_test and @sizeOf(Shard) > cache_line) {
+                @compileError(std.fmt.comptimePrint("Shard is too large to fit in a cache line: {} > {}\n", .{ @sizeOf(Shard), cache_line }));
+            }
         }
 
         /// Read-only reference to a value in the map.
@@ -345,6 +367,7 @@ fn defaultShardAmount() u32 {
 const std = @import("std");
 const builtin = @import("builtin");
 const util = @import("util.zig");
+const iters = @import("iter.zig");
 
 const Allocator = std.mem.Allocator;
 const RwLock = std.Thread.RwLock;
@@ -359,6 +382,14 @@ test {
     t.refAllDecls(AutoDora(u32, u32));
 }
 
+// duplicated so the type appears in the example in the docs
+const IntMap = Dora(
+    u32,
+    u32,
+    std.hash_map.AutoContext(u32),
+    std.hash_map.default_max_load_percentage,
+);
+
 test Dora {
     const Map = Dora(
         u32,
@@ -366,7 +397,6 @@ test Dora {
         std.hash_map.AutoContext(u32),
         std.hash_map.default_max_load_percentage,
     );
-
     var map = try Map.initCapacity(t.allocator, 16);
     defer map.deinit();
 
@@ -379,4 +409,53 @@ test Dora {
         try expectEqual(2, ref.value.*);
     }
     try expectEqual(2, map.getCopy(1));
+}
+
+test "Dora.put" {
+    var map = try IntMap.init(t.allocator);
+    defer map.deinit();
+
+    try t.expectEqual(0, map.sizeSlow());
+
+    var existing: ?u32 = null;
+    existing = try map.put(1, 2);
+    try t.expectEqual(null, existing);
+    try t.expectEqual(1, map.sizeSlow());
+
+    existing = try map.put(1, 3);
+    try t.expectEqual(2, existing);
+    try t.expectEqual(1, map.sizeSlow());
+    try t.expectEqual(3, map.getCopy(1));
+}
+
+test "Dora.parIter" {
+    var map = try IntMap.init(t.allocator);
+    defer map.deinit();
+
+    // add some stuff
+    for (0..100) |i| {
+        const x: u32 = @intCast(i);
+        try map.insert(x, x);
+    }
+    try t.expectEqual(100, map.sizeSlow());
+
+    const Context = struct {
+        iter_count: u32 = 0,
+        pub fn next(this: *@This(), _: *u32) void {
+            _ = @atomicRmw(u32, &this.iter_count, .Add, 1, .monotonic);
+        }
+    };
+
+    var ctx: Context = .{};
+    {
+        var it = try map.parIter(
+            *Context,
+            &ctx,
+            // create a thread pool instead of using an existing one
+            null,
+        );
+        defer it.deinit();
+        try it.run();
+    }
+    try t.expectEqual(map.sizeSlow(), ctx.iter_count);
 }
