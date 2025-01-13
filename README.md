@@ -1,1 +1,5 @@
-# Zig Starter Template
+# Dora
+
+A concurrent hash map in Zig for performance-sensitive applications.
+
+Go explora your data.
