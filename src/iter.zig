@@ -67,7 +67,6 @@ test ParIter {
     var map = try Map.init(t.allocator);
     defer map.deinit();
 
-
     for (0..100) |i| {
         const x: u32 = @intCast(i);
         const existing = try map.put(x, x);
