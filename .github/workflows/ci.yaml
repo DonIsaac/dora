@@ -7,14 +7,25 @@ on:
 
 env:
   ZIG_VERSION: 0.13.0
+
 jobs:
   lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint
+        uses: DonIsaac/zlint-action@main
+
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v1
         with:
           version: ${{ env.ZIG_VERSION }}
+      - name: Check
+        run: zig build check --prominent-compile-errors --summary all
+      - name: Test
+        run: zig build test --prominent-compile-errors --summary all
 
-      - name: Lint
-        uses: DonIsaac/zlint-action@main
+

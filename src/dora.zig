@@ -46,10 +46,13 @@ pub fn Dora(
         allocator: Allocator,
 
         const Self = @This();
+        /// Create an empty `Dora` map with the default shard amount.
         pub fn init(allocator: Allocator) Allocator.Error!Self {
             return initCapacity(allocator, 0);
         }
 
+        /// Create an empty `Dora` map with enough memory allocated to store
+        /// at least `capacity` new entries.
         pub fn initCapacity(allocator: Allocator, capacity: usize) Allocator.Error!Self {
             return initCapacityAndShardAmount(allocator, capacity, defaultShardAmount());
         }
@@ -131,6 +134,10 @@ pub fn Dora(
             try shard.bucket.putNoClobber(self.allocator, hash, value);
         }
 
+        /// Insert an entry under `key` if no entry exists, otherwise update the existing
+        /// entry.
+        ///
+        /// Returns the previous value stored under `key` if there was one.
         pub fn put(self: *Self, key: K, value: V) Allocator.Error!?V {
             const hash, var shard = self.lock(key, .write);
             defer shard.unlock();
@@ -380,15 +387,9 @@ const expectEqual = t.expectEqual;
 
 test {
     t.refAllDecls(AutoDora(u32, u32));
+    _ = @import("test/dora_spec.zig");
+    _ = @import("test/threading_test.zig");
 }
-
-// duplicated so the type appears in the example in the docs
-const IntMap = Dora(
-    u32,
-    u32,
-    std.hash_map.AutoContext(u32),
-    std.hash_map.default_max_load_percentage,
-);
 
 test Dora {
     const Map = Dora(
@@ -409,53 +410,4 @@ test Dora {
         try expectEqual(2, ref.value.*);
     }
     try expectEqual(2, map.getCopy(1));
-}
-
-test "Dora.put" {
-    var map = try IntMap.init(t.allocator);
-    defer map.deinit();
-
-    try t.expectEqual(0, map.sizeSlow());
-
-    var existing: ?u32 = null;
-    existing = try map.put(1, 2);
-    try t.expectEqual(null, existing);
-    try t.expectEqual(1, map.sizeSlow());
-
-    existing = try map.put(1, 3);
-    try t.expectEqual(2, existing);
-    try t.expectEqual(1, map.sizeSlow());
-    try t.expectEqual(3, map.getCopy(1));
-}
-
-test "Dora.parIter" {
-    var map = try IntMap.init(t.allocator);
-    defer map.deinit();
-
-    // add some stuff
-    for (0..100) |i| {
-        const x: u32 = @intCast(i);
-        try map.insert(x, x);
-    }
-    try t.expectEqual(100, map.sizeSlow());
-
-    const Context = struct {
-        iter_count: u32 = 0,
-        pub fn next(this: *@This(), _: *u32) void {
-            _ = @atomicRmw(u32, &this.iter_count, .Add, 1, .monotonic);
-        }
-    };
-
-    var ctx: Context = .{};
-    {
-        var it = try map.parIter(
-            *Context,
-            &ctx,
-            // create a thread pool instead of using an existing one
-            null,
-        );
-        defer it.deinit();
-        try it.run();
-    }
-    try t.expectEqual(map.sizeSlow(), ctx.iter_count);
 }
