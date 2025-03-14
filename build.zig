@@ -18,6 +18,7 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
     const single_threaded = b.option(bool, "single-threaded", "Only ever use one thread") orelse false;
+    const build_tests = b.option(bool, "build-tests", "Also spit out binaries for tests") orelse false;
 
     const lib = b.addStaticLibrary(.{
         .name = NAME,
@@ -83,6 +84,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+    if (build_tests) b.installArtifact(lib_unit_tests);
 
     const exe_unit_tests = b.addTest(.{
         .root_source_file = b.path("src/main.zig"),
