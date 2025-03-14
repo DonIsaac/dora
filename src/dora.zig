@@ -439,10 +439,11 @@ test "Dora.parIter" {
     }
     try t.expectEqual(100, map.sizeSlow());
 
+
     const Context = struct {
         iter_count: u32 = 0,
-        pub fn next(this: *@This(), _: *u32) void {
-            _ = @atomicRmw(u32, &this.iter_count, .Add, 1, .monotonic);
+        pub fn next(self: *@This(), _: *u32) void {
+            _ = @atomicRmw(u32, &self.iter_count, .Add, 1, .monotonic);
         }
     };
 

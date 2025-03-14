@@ -45,8 +45,8 @@ fn reifyInt(x: anytype) Reified(@TypeOf(x)) {
 }
 fn reifyIntT(I: type, x: I) Reified(I) {
     return switch (@typeInfo(I)) {
-        .Int => x,
-        .ComptimeInt => @as(usize, @intCast(x)),
+        .int => x,
+        .comptime_int => @as(usize, @intCast(x)),
         else => @compileError("This function only works with integers, received " ++ @typeName(I)),
     };
 }
@@ -54,7 +54,7 @@ fn assertInt(T: type) void {
     if (!@inComptime()) @compileError("This function should only be called at comptime");
 
     switch (@typeInfo(T)) {
-        .Int, .ComptimeInt => {},
+        .int, .comptime_int => {},
         else => @compileError("isPowerOfTwo only works with integers, received " ++ @typeName(T)),
     }
 }
