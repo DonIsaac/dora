@@ -286,7 +286,7 @@ pub fn Dora(
         // Also, HashMap is _gigantic_ in test builds. Doesn't really matter, so
         // we just skip the check.
         comptime {
-            if (!builtin.is_test and @sizeOf(Shard) > cache_line) {
+            if (!builtin.is_test and builtin.mode != .Debug and @sizeOf(Shard) > cache_line) {
                 @compileError(std.fmt.comptimePrint("Shard is too large to fit in a cache line: {} > {}\n", .{ @sizeOf(Shard), cache_line }));
             }
         }
