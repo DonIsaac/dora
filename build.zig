@@ -1,5 +1,13 @@
 const std = @import("std");
+const pkg: BuildZon = @import("build.zig.zon");
 
+const BuildZon = struct {
+    name: enum { dora },
+    version: []const u8,
+    minimum_zig_version: []const u8,
+    fingerprint: u64,
+    paths: []const []const u8,
+};
 /// Name of library and executable. Set this to the name of your project.
 const NAME = "dora";
 
@@ -7,6 +15,7 @@ const NAME = "dora";
 // declaratively construct a build graph that will be executed by an external
 // runner.
 pub fn build(b: *std.Build) void {
+    const version = std.SemanticVersion.parse(pkg.version) catch unreachable;
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -20,14 +29,17 @@ pub fn build(b: *std.Build) void {
     const single_threaded = b.option(bool, "single-threaded", "Only ever use one thread") orelse false;
     const build_tests = b.option(bool, "build-tests", "Also spit out binaries for tests") orelse false;
 
-    const lib = b.addStaticLibrary(.{
-        .name = NAME,
-        // In this case the main source file is merely a path, however, in more
-        // complicated build scripts, this could be a generated file.
+    const dora = b.addModule(NAME, .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .single_threaded = single_threaded,
+    });
+    const lib = b.addLibrary(std.Build.LibraryOptions{
+        .name = NAME,
+        .version = version,
+        .root_module = dora,
+        .linkage = .static,
     });
 
     // This declares intent for the library to be installed into the standard

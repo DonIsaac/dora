@@ -23,7 +23,7 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
-    .dependencies = .{
+    // .dependencies = .{
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
@@ -52,7 +52,7 @@
         //    // actually used.
         //    .lazy = false,
         //},
-    },
+    // },
 
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that
