@@ -7,4 +7,5 @@ pub const AutoDora = dora.AutoDora;
 test {
     _ = Dora;
     std.testing.refAllDecls(@import("iter.zig"));
+    std.testing.refAllDecls(@import("RwLock.zig"));
 }

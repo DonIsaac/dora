@@ -96,21 +96,21 @@ pub fn Dora(
             if (shard.bucket.getPtr(hash)) |value| {
                 return Ref{ .value = value, .shard = shard };
             } else {
-                shard.unlock();
+                shard.unlock(.read);
                 return null;
             }
         }
 
         pub fn getCopy(self: *Self, key: K) ?V {
             const hash, var shard = self.lock(key, .read);
-            defer shard.unlock();
+            defer shard.unlock(.read);
             return shard.bucket.get(hash);
         }
 
         pub fn entry(self: *Self, key: K) ?Bucket.Entry {
             const hash, var shard = self.lock(key, .write);
             return shard.bucket.getEntry(hash) orelse empty: {
-                shard.unlock();
+                shard.unlock(.write);
                 break :empty null;
             };
         }
@@ -119,7 +119,7 @@ pub fn Dora(
             var size: usize = 0;
             for (self.getShards()) |*shard| {
                 shard.lock(.read);
-                defer shard.unlock();
+                defer shard.unlock(.read);
                 size += shard.bucket.size;
             }
             return size;
@@ -130,7 +130,7 @@ pub fn Dora(
             const hash, var shard = self.lock(key, .write);
             shard.assertCurrentThreadWritable();
             // assert(shard.)
-            defer shard.unlock();
+            defer shard.unlock(.write);
             try shard.bucket.putNoClobber(self.allocator, hash, value);
         }
 
@@ -140,7 +140,7 @@ pub fn Dora(
         /// Returns the previous value stored under `key` if there was one.
         pub fn put(self: *Self, key: K, value: V) Allocator.Error!?V {
             const hash, var shard = self.lock(key, .write);
-            defer shard.unlock();
+            defer shard.unlock(.write);
             const old: ?V = if (shard.bucket.get(hash)) |v| v else null;
             try shard.bucket.put(self.allocator, hash, value);
             return old;
@@ -148,7 +148,7 @@ pub fn Dora(
 
         pub fn delete(self: *Self, key: K) bool {
             const hash, var shard = self.lock(key, .write);
-            defer shard.unlock();
+            defer shard.unlock(.write);
             const ent = shard.bucket.getEntry(hash) orelse return false;
             deinitValue(ent.value_ptr);
 
@@ -254,8 +254,11 @@ pub fn Dora(
                 }
             }
 
-            pub inline fn unlock(self: *@This()) void {
-                self._lock.unlock();
+            pub inline fn unlock(self: *@This(), comptime ty: util.RW) void {
+                if (comptime ty == .write)
+                    self._lock.unlock()
+                else
+                    self._lock.unlockShared();
                 if (is_safe) {
                     assert(self._state == .locked);
                     assert(self._state.locked.owner == std.Thread.getCurrentId());
@@ -287,7 +290,25 @@ pub fn Dora(
         // we just skip the check.
         comptime {
             if (!builtin.is_test and builtin.mode != .Debug and @sizeOf(Shard) > cache_line) {
-                @compileError(std.fmt.comptimePrint("Shard is too large to fit in a cache line: {} > {}\n", .{ @sizeOf(Shard), cache_line }));
+                @compileError(
+                    std.fmt.comptimePrint(
+                        \\Shard is too large to fit in a cache line.
+                        \\- Cache line size: {}
+                        \\- Shard size: {}
+                        \\- Bucket size: {}
+                        \\- Lock size: {}
+                        \\- Lock kind: {s}
+                        \\
+                    ,
+                        .{
+                            cache_line,
+                            @sizeOf(Shard),
+                            @sizeOf(Bucket),
+                            @sizeOf(RwLock),
+                            @typeName(RwLock),
+                        },
+                    ),
+                );
             }
         }
 
@@ -299,7 +320,7 @@ pub fn Dora(
             value: *const V,
             shard: *Shard,
             pub fn release(self: *Ref) void {
-                self.shard.unlock();
+                self.shard.unlock(.read);
             }
         };
 
@@ -311,7 +332,7 @@ pub fn Dora(
             value: *V,
             shard: *Shard,
             pub fn release(self: *RefMut) void {
-                self.shard.unlock();
+                self.shard.unlock(.write);
             }
         };
 
@@ -324,7 +345,7 @@ pub fn Dora(
             value: *const V,
             shard: *Shard,
             pub fn release(self: *Entry) void {
-                self.shard.unlock();
+                self.shard.unlock(.read);
             }
         };
 
@@ -337,7 +358,7 @@ pub fn Dora(
             value: *V,
             lock: *RwLock,
             pub fn release(self: *EntryMut) void {
-                self.lock.unlock();
+                self.lock.unlock(.write);
             }
         };
     };
@@ -377,7 +398,7 @@ const util = @import("util.zig");
 const iters = @import("iter.zig");
 
 const Allocator = std.mem.Allocator;
-const RwLock = std.Thread.RwLock;
+const RwLock = @import("RwLock.zig").RwLock(.{});
 
 const assert = std.debug.assert;
 const cache_line = std.atomic.cache_line;
