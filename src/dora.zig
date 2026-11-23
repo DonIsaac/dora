@@ -328,6 +328,7 @@ pub fn Dora(
             shard: *Shard,
             pub fn release(self: *Ref) void {
                 self.shard.unlock(.read);
+                self.* = undefined;
             }
         };
 
@@ -340,6 +341,7 @@ pub fn Dora(
             shard: *Shard,
             pub fn release(self: *RefMut) void {
                 self.shard.unlock(.write);
+                self.* = undefined;
             }
         };
 
@@ -353,6 +355,7 @@ pub fn Dora(
             shard: *Shard,
             pub fn release(self: *Entry) void {
                 self.shard.unlock(.read);
+                self.* = undefined;
             }
         };
 
@@ -366,6 +369,7 @@ pub fn Dora(
             shard: *Shard,
             pub fn release(self: *EntryMut) void {
                 self.shard.unlock(.write);
+                self.* = undefined;
             }
         };
     };
@@ -381,6 +385,8 @@ const IdentityContext = struct {
 };
 
 fn defaultShardAmount() u32 {
+    if (comptime builtin.single_threaded) return 1;
+
     const Static = struct {
         /// 0 means "not computed yet". Computing it is idempotent, so racing
         /// threads at worst do the work twice and store the same value.
@@ -390,13 +396,11 @@ fn defaultShardAmount() u32 {
     const cached = Static.amount.load(.monotonic);
     if (cached != 0) return cached;
 
-    const nthreads = if (builtin.single_threaded)
-        1
-    else
-        std.Thread.getCpuCount() catch 1;
+    const nthreads = std.Thread.getCpuCount() catch 1;
     const amount = util.nextPowerOfTwo(u32, @truncate(nthreads * 4));
     std.debug.assert(amount > 0);
     Static.amount.store(amount, .monotonic);
+
     return amount;
 }
 
