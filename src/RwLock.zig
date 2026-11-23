@@ -29,6 +29,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const atomic = std.atomic;
 const Thread = std.Thread;
+const Io = std.Io;
 
 const assert = std.debug.assert;
 
@@ -37,8 +38,8 @@ pub const Options = struct {
     small_state: bool = false,
     /// Check for misuse (e.g. unlocking a lock that is not held).
     safe: bool = switch (builtin.mode) {
-        .Debug, .ReleaseSafe => true,
-        .ReleaseFast, .ReleaseSmall => false,
+        .debug, .safe => true,
+        .fast, .small => false,
     },
 };
 
@@ -225,7 +226,7 @@ fn expectBlocks(comptime held: enum { read, write }, comptime wanted: enum { rea
     }
     const thread = try Thread.spawn(.{}, Waiter.run, .{ &rw, &acquired });
 
-    Thread.sleep(20 * std.time.ns_per_ms);
+    try t.io.sleep(.fromMilliseconds(20), .awake);
     const got_in_early = acquired.load(.acquire);
 
     switch (held) {
@@ -267,9 +268,9 @@ test "waiting writer blocks new readers" {
     const thread = try Thread.spawn(.{}, Writer.run, .{&rw});
 
     // Wait for the writer to announce itself.
-    var timer = try std.time.Timer.start();
+    const start = Io.Timestamp.now(t.io, .awake);
     while (rw.state.load(.monotonic) & Rw.writer_waiting == 0) {
-        if (timer.read() > std.time.ns_per_s) {
+        if (start.untilNow(t.io, .awake).toSeconds() >= 1) {
             rw.unlockShared();
             thread.join();
             return error.WriterNeverWaited;
@@ -301,7 +302,7 @@ test "overlapping readers do not starve a writer" {
             while (!self.stop.load(.acquire)) {
                 self.rw.lockShared();
                 // Hold long enough that readers always overlap.
-                Thread.sleep(100 * std.time.ns_per_us);
+                t.io.sleep(.fromMicroseconds(100), .awake) catch {};
                 self.rw.unlockShared();
             }
         }
@@ -316,16 +317,16 @@ test "overlapping readers do not starve a writer" {
     }
 
     // Let the readers get going so the lock is (almost) always read-held.
-    Thread.sleep(10 * std.time.ns_per_ms);
+    try t.io.sleep(.fromMilliseconds(10), .awake);
 
-    var timer = try std.time.Timer.start();
+    const start = Io.Timestamp.now(t.io, .awake);
     for (0..10) |_| {
         shared.rw.lock();
         shared.rw.unlock();
     }
     // Without writer priority this can take forever. Be generous to avoid
     // flaking on slow CI machines.
-    try t.expect(timer.read() < 5 * std.time.ns_per_s);
+    try t.expect(start.untilNow(t.io, .awake).toSeconds() < 5);
 }
 
 test "readers and writers under contention" {

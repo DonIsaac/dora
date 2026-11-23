@@ -1,57 +1,52 @@
 const std = @import("std");
 const util = @import("util.zig");
-const Allocator = std.mem.Allocator;
-const ThreadPool = std.Thread.Pool;
-const WaitGroup = std.Thread.WaitGroup;
+const Io = std.Io;
 
 pub fn ParIter(TDora: type, Context: type, comptime ty: util.RW) type {
     return struct {
-        pool: *ThreadPool,
-        does_own_pool: bool,
+        io: Io,
         dora: *TDora,
         context: Context,
-        wait_group: WaitGroup = .{},
+        group: Io.Group = .init,
 
         const Self = @This();
+        const Shard = std.meta.Child(@FieldType(TDora, "shards"));
 
-        pub fn init(dora: *TDora, context: Context, allocator: Allocator) !Self {
-            const pool = try allocator.create(ThreadPool);
-            errdefer allocator.destroy(pool);
-            try ThreadPool.init(pool, .{
-                .allocator = allocator,
-                .n_jobs = dora.shard_count,
-            });
-
+        pub fn init(dora: *TDora, context: Context, io: Io) Self {
             return Self{
-                .pool = pool,
-                .does_own_pool = true,
+                .io = io,
                 .dora = dora,
                 .context = context,
             };
         }
 
-        pub fn run(self: *Self) !void {
-            var shards = self.dora.shards[0..self.dora.shard_count];
-            _ = &shards;
+        /// Spawn one task per shard. Tasks are not guaranteed to have run
+        /// until `wait` or `deinit` returns.
+        pub fn run(self: *Self) void {
+            const shards = self.dora.shards[0..self.dora.shard_count];
             for (shards) |*shard| {
-                self.pool.spawnWg(&self.wait_group, runOnShard, .{ self.context, shard });
-                // self.pool.spawn(&self.wait_group, runOnShard, .{ self.context, shard });
+                self.group.async(self.io, runOnShard, .{ self.context, shard });
             }
         }
 
+        /// Block until every spawned task has finished.
+        pub fn wait(self: *Self) Io.Cancelable!void {
+            try self.group.await(self.io);
+        }
+
+        /// Waits for any outstanding tasks to finish, so every value is
+        /// visited even if `wait` was never called.
         pub fn deinit(self: *Self) void {
-            // No point in waiting if we own the pool; joining the threads will
-            // do that for us.
-            self.wait_group.wait();
-            if (self.does_own_pool) {
-                const allocator = self.pool.allocator;
-                self.pool.deinit();
-                allocator.destroy(self.pool);
-            }
+            self.group.await(self.io) catch |err| switch (err) {
+                // Cancellation was requested on the caller. Tasks have still
+                // all run by the time `await` returns. `deinit` can't return
+                // the error, so re-arm it for the caller's next cancel point.
+                error.Canceled => self.io.recancel(),
+            };
             self.* = undefined;
         }
 
-        fn runOnShard(context: Context, shard: anytype) void {
+        fn runOnShard(context: Context, shard: *Shard) void {
             shard.lock(ty);
             defer shard.unlock(ty);
 
@@ -88,17 +83,10 @@ test ParIter {
 
     var ctx = Context{};
     {
-        // SAFETY: init sets a value here
-        var pool: std.Thread.Pool = undefined;
-        try pool.init(.{ .allocator = t.allocator });
-        defer pool.deinit();
-        var iter = ParIter(Map, *Context, .read){
-            .context = &ctx,
-            .pool = &pool,
-            .does_own_pool = false,
-            .dora = &map,
-        };
-        try iter.run();
+        var iter = ParIter(Map, *Context, .read).init(&map, &ctx, t.io);
+        defer iter.deinit();
+        iter.run();
+        try iter.wait();
     }
     try t.expectEqual(map.sizeSlow(), ctx.iter_count);
 

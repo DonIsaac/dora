@@ -28,12 +28,16 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const single_threaded = b.option(bool, "single-threaded", "Only ever use one thread") orelse false;
     const build_tests = b.option(bool, "build-tests", "Also spit out binaries for tests") orelse false;
+    // Off by default so projects depending on dora never get TSAN unless they
+    // ask for it. CI passes `-Dtsan` explicitly.
+    const tsan = b.option(bool, "tsan", "Enable ThreadSanitizer") orelse false;
 
     const dora = b.addModule(NAME, .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .single_threaded = single_threaded,
+        .sanitize_thread = tsan,
     });
     const lib = b.addLibrary(std.Build.LibraryOptions{
         .name = NAME,
@@ -47,12 +51,16 @@ pub fn build(b: *std.Build) void {
     // running `zig build`).
     b.installArtifact(lib);
 
-    const exe = b.addExecutable(.{
-        .name = NAME,
+    const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .single_threaded = single_threaded,
+        .sanitize_thread = tsan,
+    });
+    const exe = b.addExecutable(.{
+        .name = NAME,
+        .root_module = exe_mod,
     });
 
     // This declares intent for the executable to be installed into the
@@ -73,9 +81,7 @@ pub fn build(b: *std.Build) void {
 
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     // This creates a build step. It will be visible in the `zig build --help` menu,
     // and can be selected like this: `zig build run`
@@ -85,26 +91,12 @@ pub fn build(b: *std.Build) void {
 
     // Creates a step for unit testing. This only builds the test executable
     // but does not run it.
-    // TODO: TSAN linking is broken in 0.13 but fixed on main. Enable it when 0.14 releases.
-    // see: https://github.com/ziglang/zig/issues/15241
-    const lib_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        // .sanitize_thread = true,
-        .single_threaded = single_threaded,
-    });
+    const lib_unit_tests = b.addTest(.{ .root_module = dora });
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
     if (build_tests) b.installArtifact(lib_unit_tests);
 
-    const exe_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        // .sanitize_thread = true,
-        .single_threaded = single_threaded,
-    });
+    const exe_unit_tests = b.addTest(.{ .root_module = exe_mod });
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
@@ -118,26 +110,20 @@ pub fn build(b: *std.Build) void {
     {
         const check_step = b.step("check", "Check for semantic errors");
 
-        inline for (.{ "src/root.zig", "src/main.zig" }) |source_file| {
-            const check_test = b.addTest(.{
-                .root_source_file = b.path(source_file),
-                .target = target,
-                .optimize = optimize,
-            });
+        for ([_]*std.Build.Module{ dora, exe_mod }) |mod| {
+            const check_test = b.addTest(.{ .root_module = mod });
             check_step.dependOn(&check_test.step);
-
-            const addArtifact = comptime if (std.mem.endsWith(u8, source_file, "root.zig"))
-                std.Build.addStaticLibrary
-            else
-                std.Build.addExecutable;
-
-            const check_artifact = addArtifact(b, .{
-                .name = NAME,
-                .root_source_file = b.path(source_file),
-                .target = target,
-                .optimize = optimize,
-            });
-            check_step.dependOn(&check_artifact.step);
         }
+        const check_lib = b.addLibrary(.{
+            .name = NAME,
+            .root_module = dora,
+            .linkage = .static,
+        });
+        check_step.dependOn(&check_lib.step);
+        const check_exe = b.addExecutable(.{
+            .name = NAME,
+            .root_module = exe_mod,
+        });
+        check_step.dependOn(&check_exe.step);
     }
 }
