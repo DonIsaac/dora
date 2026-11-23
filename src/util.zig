@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 
 pub const RW = enum { read, write };
 
-pub const IS_DEBUG = builtin.mode == .Debug;
+pub const IS_DEBUG = builtin.mode == .debug;
 
 pub inline fn debugAssert(cond: bool, message: []const u8) void {
     if (comptime IS_DEBUG) {

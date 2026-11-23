@@ -6,7 +6,7 @@ on:
     branches: ["main"]
 
 env:
-  ZIG_VERSION: 0.14.0
+  ZIG_VERSION: 0.17.1
 
 jobs:
   lint:
@@ -24,8 +24,8 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
       - name: Check
-        run: zig build check --prominent-compile-errors --summary all
+        run: zig build check --summary all
       - name: Test
-        run: zig build test --prominent-compile-errors --summary all
+        run: zig build test -Dtsan --summary all
 
 

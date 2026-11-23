@@ -11,24 +11,27 @@ const MAX_KEY = 4;
 fn writeInts(map: *IntMap) void {
     for (0..1000) |i| {
         const x: u32 = @intCast(i);
-        _ = map.put(x % MAX_KEY, x) catch |e| std.debug.panic("put failed: {}", .{e});
+        _ = map.put(x % MAX_KEY, x) catch |e| std.debug.panic("put failed: {t}", .{e});
     }
 }
 
 test ".put() write contention on the same keys" {
     // #threads \in [1, 4]
     const thread_count: u32 = @min(@max(1, std.Thread.getCpuCount() catch 1), 4);
-    var map = try IntMap.initCapacityAndShardAmount(t.allocator, 0, thread_count);
+    // Shard amount must be a power of two greater than 1, so it can't track
+    // the thread count.
+    var map = try IntMap.initCapacityAndShardAmount(t.allocator, 0, 4);
     defer map.deinit();
 
     {
-        var pool: std.Thread.Pool = undefined;
-        try pool.init(.{ .allocator = t.allocator, .n_jobs = thread_count });
-        defer pool.deinit();
-
+        // Writers run on separate threads, or one after another in
+        // single-threaded builds.
+        var group: std.Io.Group = .init;
+        defer group.cancel(t.io);
         for (0..thread_count) |_| {
-            try pool.spawn(writeInts, .{&map});
+            group.async(t.io, writeInts, .{&map});
         }
+        try group.await(t.io);
     }
 
     try expectEqual(4, map.sizeSlow());

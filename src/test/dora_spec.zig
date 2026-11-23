@@ -51,14 +51,10 @@ test "Dora.parIter" {
 
     var ctx: Context = .{};
     {
-        var it = try map.parIter(
-            *Context,
-            &ctx,
-            // create a thread pool instead of using an existing one
-            null,
-        );
+        var it = map.parIter(*Context, &ctx, t.io);
         defer it.deinit();
-        try it.run();
+        it.run();
+        try it.wait();
     }
     try expectEqual(map.sizeSlow(), ctx.iter_count);
 }

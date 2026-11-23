@@ -31,7 +31,7 @@ pub fn Dora(
     }
     if (@hasDecl(Context, "deinit")) {
         switch (@typeInfo(@TypeOf(Context.deinit))) {
-            .@"fn" => |signature| if (signature.params.len != 2) {
+            .@"fn" => |signature| if (signature.param_types.len != 2) {
                 @compileError("Context.deinit must match signature `fn (self: @This(), value: V) void, found " ++ @typeName(@TypeOf(Context.deinit)));
             },
             else => @compileError("Context.deinit must be a function"),
@@ -74,7 +74,7 @@ pub fn Dora(
 
             const cps: u32 = @intCast(actual_capacity / shard_amount);
 
-            var shards = try allocator.alignedAlloc(Shard, cache_line, shard_amount);
+            var shards = try allocator.alignedAlloc(Shard, .fromByteUnits(cache_line), shard_amount);
             errdefer allocator.free(shards);
 
             for (0..shard_amount) |i| {
@@ -162,22 +162,20 @@ pub fn Dora(
             return true;
         }
 
+        /// Iterate over every value in the map, visiting shards in parallel
+        /// as tasks spawned on `io`.
+        ///
+        /// `io` must run tasks on separate OS threads (e.g. `std.Io.Threaded`).
+        /// Shard locks block the OS thread rather than yielding to `io`, so an
+        /// evented `Io` that multiplexes tasks onto one thread can deadlock
+        /// when a task waits on a shard held by another task on that thread.
         pub fn parIter(
             self: *Self,
             comptime IterContext: type,
             context: IterContext,
-            pool: ?*std.Thread.Pool,
-        ) !iters.ParIter(Self, IterContext, util.RW.read) {
-            if (pool) |p| {
-                return .{
-                    .pool = p,
-                    .does_own_pool = false,
-                    .dora = self,
-                    .context = context,
-                };
-            } else {
-                return iters.ParIter(Self, IterContext, .read).init(self, context, self.allocator);
-            }
+            io: std.Io,
+        ) iters.ParIter(Self, IterContext, util.RW.read) {
+            return .init(self, context, io);
         }
 
         inline fn deinitValue(value: *V) void {
@@ -298,7 +296,7 @@ pub fn Dora(
         // Also, HashMap is _gigantic_ in test builds. Doesn't really matter, so
         // we just skip the check.
         comptime {
-            if (!builtin.is_test and builtin.mode != .Debug and @sizeOf(Shard) > cache_line) {
+            if (!builtin.is_test and builtin.mode != .debug and @sizeOf(Shard) > cache_line) {
                 @compileError(
                     std.fmt.comptimePrint(
                         \\Shard is too large to fit in a cache line.
@@ -384,21 +382,22 @@ const IdentityContext = struct {
 
 fn defaultShardAmount() u32 {
     const Static = struct {
-        const b = @import("builtin");
-        fn doCalculateDefaultShardAmount() void {
-            const nthreads = if (b.single_threaded)
-                1
-            else
-                std.Thread.getCpuCount() catch 1;
-            amount = util.nextPowerOfTwo(u32, @truncate(nthreads * 4));
-        }
-        var amount: u32 = 0;
-        var calculateDefaultShardAmount = std.once(doCalculateDefaultShardAmount);
+        /// 0 means "not computed yet". Computing it is idempotent, so racing
+        /// threads at worst do the work twice and store the same value.
+        var amount: std.atomic.Value(u32) = .init(0);
     };
 
-    Static.calculateDefaultShardAmount.call();
-    std.debug.assert(Static.amount > 0);
-    return Static.amount;
+    const cached = Static.amount.load(.monotonic);
+    if (cached != 0) return cached;
+
+    const nthreads = if (builtin.single_threaded)
+        1
+    else
+        std.Thread.getCpuCount() catch 1;
+    const amount = util.nextPowerOfTwo(u32, @truncate(nthreads * 4));
+    std.debug.assert(amount > 0);
+    Static.amount.store(amount, .monotonic);
+    return amount;
 }
 
 const std = @import("std");
