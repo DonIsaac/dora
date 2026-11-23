@@ -30,8 +30,8 @@ pub fn Dora(
         @compileError("Context must have hash and eql functions");
     }
     if (@hasDecl(Context, "deinit")) {
-        switch (@typeInfo(Context.deinit)) {
-            .Fn => |signature| if (signature.params.len != 2) {
+        switch (@typeInfo(@TypeOf(Context.deinit))) {
+            .@"fn" => |signature| if (signature.params.len != 2) {
                 @compileError("Context.deinit must match signature `fn (self: @This(), value: V) void, found " ++ @typeName(@TypeOf(Context.deinit)));
             },
             else => @compileError("Context.deinit must be a function"),
@@ -107,12 +107,18 @@ pub fn Dora(
             return shard.bucket.get(hash);
         }
 
-        pub fn entry(self: *Self, key: K) ?Bucket.Entry {
+        /// Get a mutable reference to the entry stored under `key`, if any.
+        ///
+        /// The shard containing `key` stays write-locked until you call
+        /// `.release()` on the returned entry.
+        pub fn entry(self: *Self, key: K) ?EntryMut {
             const hash, var shard = self.lock(key, .write);
-            return shard.bucket.getEntry(hash) orelse empty: {
+            if (shard.bucket.getPtr(hash)) |value| {
+                return EntryMut{ .key = key, .value = value, .shard = shard };
+            } else {
                 shard.unlock(.write);
-                break :empty null;
-            };
+                return null;
+            }
         }
 
         pub fn sizeSlow(self: *Self) usize {
@@ -176,7 +182,8 @@ pub fn Dora(
 
         inline fn deinitValue(value: *V) void {
             if (comptime @hasDecl(Context, "deinit")) {
-                Context.deinit(value);
+                // Like `hash` and `eql`, contexts are assumed to be stateless.
+                Context.deinit(undefined, value.*);
             }
         }
 
@@ -189,7 +196,7 @@ pub fn Dora(
                 if (@hasDecl(Context, "deinit")) {
                     var iter = shard.bucket.valueIterator();
                     while (iter.next()) |value| {
-                        Context.deinit(value);
+                        deinitValue(value);
                     }
                 }
                 shard.bucket.deinit(self.allocator);
@@ -343,7 +350,7 @@ pub fn Dora(
         /// ## Safety
         /// Failure to call `.release()` _will_ result in a deadlock.
         const Entry = struct {
-            key: *const K,
+            key: K,
             value: *const V,
             shard: *Shard,
             pub fn release(self: *Entry) void {
@@ -356,11 +363,11 @@ pub fn Dora(
         /// ## Safety
         /// Failure to call `.release()` _will_ result in a deadlock.
         const EntryMut = struct {
-            key: *const K,
+            key: K,
             value: *V,
-            lock: *RwLock,
+            shard: *Shard,
             pub fn release(self: *EntryMut) void {
-                self.lock.unlock(.write);
+                self.shard.unlock(.write);
             }
         };
     };
