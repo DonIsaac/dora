@@ -229,57 +229,59 @@ pub fn Dora(
         const Shard = struct {
             bucket: Bucket = .{},
             _lock: RwLock = .{},
-            /// Is this shard locked, how, and by who? When multiple threads
-            /// are sharing a read lock, the last one to obtain it is recorded.
+            /// Is this shard write-locked, and by whom? Only writers record
+            /// themselves here. Many readers can hold the lock at once, and
+            /// having them all write to this field would be a data race.
             _state: DebugState = if (is_safe) .unlocked else {},
             const is_safe = std.debug.runtime_safety or builtin.is_test;
 
             /// This is a ZST in fast/smol release builds.
             const DebugState = if (!is_safe) void else union(enum) {
                 unlocked: void,
-                locked: struct { state: util.RW, owner: u64 },
+                write_locked: struct { owner: std.Thread.Id },
             };
 
             pub inline fn lock(self: *Shard, comptime ty: util.RW) void {
-                if (comptime ty == .write) {
-                    self._lock.lock();
-                } else {
-                    self._lock.lockShared();
-                }
-                if (is_safe) {
-                    assert(self._state == .unlocked);
-                    self._state = .{
-                        .locked = .{ .owner = std.Thread.getCurrentId(), .state = ty },
-                    };
+                switch (ty) {
+                    .write => {
+                        self._lock.lock();
+                        if (is_safe) {
+                            assert(self._state == .unlocked);
+                            self._state = .{ .write_locked = .{ .owner = std.Thread.getCurrentId() } };
+                        }
+                    },
+                    .read => {
+                        self._lock.lockShared();
+                        if (is_safe) assert(self._state == .unlocked);
+                    },
                 }
             }
 
             pub inline fn unlock(self: *@This(), comptime ty: util.RW) void {
-                if (comptime ty == .write)
-                    self._lock.unlock()
-                else
-                    self._lock.unlockShared();
-                if (is_safe) {
-                    assert(self._state == .locked);
-                    assert(self._state.locked.owner == std.Thread.getCurrentId());
-                    self._state = .unlocked;
+                switch (ty) {
+                    .write => {
+                        self.assertCurrentThreadWritable();
+                        if (is_safe) self._state = .unlocked;
+                        self._lock.unlock();
+                    },
+                    .read => {
+                        if (is_safe) assert(self._state == .unlocked);
+                        self._lock.unlockShared();
+                    },
                 }
             }
 
             inline fn assertCurrentThreadWritable(self: *Shard) void {
                 if (is_safe) {
-                    assert(self._state == .locked);
-                    assert(self._state.locked.state == .write);
-                    assert(self._state.locked.owner == std.Thread.getCurrentId());
+                    assert(self._state == .write_locked);
+                    assert(self._state.write_locked.owner == std.Thread.getCurrentId());
                 }
             }
 
+            /// Readers are not tracked individually, so this can only check
+            /// that no writer holds the shard.
             inline fn assertCurrentThreadReadable(self: *Shard) void {
-                if (is_safe) {
-                    assert(self._state == .locked);
-                    assert(self._state.locked.state == .read);
-                    assert(self._state.locked.owner == std.Thread.getCurrentId());
-                }
+                if (is_safe) assert(self._state == .unlocked);
             }
         };
 
