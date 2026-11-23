@@ -62,3 +62,55 @@ test "Dora.parIter" {
     }
     try expectEqual(map.sizeSlow(), ctx.iter_count);
 }
+
+test "Dora.entry" {
+    var map = try IntMap.init(t.allocator);
+    defer map.deinit();
+
+    try expectEqual(null, map.entry(1));
+    _ = try map.put(1, 2);
+
+    {
+        var ent = map.entry(1).?;
+        defer ent.release();
+        try expectEqual(1, ent.key);
+        try expectEqual(2, ent.value.*);
+        ent.value.* = 3;
+    }
+
+    // The shard was released, so these do not deadlock.
+    try expectEqual(3, map.getCopy(1));
+    try expectEqual(3, try map.put(1, 4));
+    try expectEqual(4, map.getCopy(1));
+}
+
+test "Context.deinit is called for removed and remaining values" {
+    const CountingContext = struct {
+        var deinit_count: u32 = 0;
+
+        pub fn hash(_: @This(), key: u32) u64 {
+            return std.hash.Wyhash.hash(0, std.mem.asBytes(&key));
+        }
+        pub fn eql(_: @This(), a: u32, b: u32) bool {
+            return a == b;
+        }
+        pub fn deinit(_: @This(), value: u32) void {
+            _ = value;
+            deinit_count += 1;
+        }
+    };
+    CountingContext.deinit_count = 0;
+
+    const Map = Dora(u32, u32, CountingContext, std.hash_map.default_max_load_percentage);
+    {
+        var map = try Map.init(t.allocator);
+        defer map.deinit();
+
+        for (0..10) |i| try map.insert(@intCast(i), @intCast(i));
+        try t.expect(map.delete(3));
+        try t.expect(!map.delete(3));
+        try expectEqual(1, CountingContext.deinit_count);
+    }
+    // deinit() cleans up the 9 remaining values
+    try expectEqual(10, CountingContext.deinit_count);
+}

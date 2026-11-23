@@ -30,8 +30,8 @@ pub fn Dora(
         @compileError("Context must have hash and eql functions");
     }
     if (@hasDecl(Context, "deinit")) {
-        switch (@typeInfo(Context.deinit)) {
-            .Fn => |signature| if (signature.params.len != 2) {
+        switch (@typeInfo(@TypeOf(Context.deinit))) {
+            .@"fn" => |signature| if (signature.params.len != 2) {
                 @compileError("Context.deinit must match signature `fn (self: @This(), value: V) void, found " ++ @typeName(@TypeOf(Context.deinit)));
             },
             else => @compileError("Context.deinit must be a function"),
@@ -96,30 +96,36 @@ pub fn Dora(
             if (shard.bucket.getPtr(hash)) |value| {
                 return Ref{ .value = value, .shard = shard };
             } else {
-                shard.unlock();
+                shard.unlock(.read);
                 return null;
             }
         }
 
         pub fn getCopy(self: *Self, key: K) ?V {
             const hash, var shard = self.lock(key, .read);
-            defer shard.unlock();
+            defer shard.unlock(.read);
             return shard.bucket.get(hash);
         }
 
-        pub fn entry(self: *Self, key: K) ?Bucket.Entry {
+        /// Get a mutable reference to the entry stored under `key`, if any.
+        ///
+        /// The shard containing `key` stays write-locked until you call
+        /// `.release()` on the returned entry.
+        pub fn entry(self: *Self, key: K) ?EntryMut {
             const hash, var shard = self.lock(key, .write);
-            return shard.bucket.getEntry(hash) orelse empty: {
-                shard.unlock();
-                break :empty null;
-            };
+            if (shard.bucket.getPtr(hash)) |value| {
+                return EntryMut{ .key = key, .value = value, .shard = shard };
+            } else {
+                shard.unlock(.write);
+                return null;
+            }
         }
 
         pub fn sizeSlow(self: *Self) usize {
             var size: usize = 0;
             for (self.getShards()) |*shard| {
                 shard.lock(.read);
-                defer shard.unlock();
+                defer shard.unlock(.read);
                 size += shard.bucket.size;
             }
             return size;
@@ -130,7 +136,7 @@ pub fn Dora(
             const hash, var shard = self.lock(key, .write);
             shard.assertCurrentThreadWritable();
             // assert(shard.)
-            defer shard.unlock();
+            defer shard.unlock(.write);
             try shard.bucket.putNoClobber(self.allocator, hash, value);
         }
 
@@ -140,7 +146,7 @@ pub fn Dora(
         /// Returns the previous value stored under `key` if there was one.
         pub fn put(self: *Self, key: K, value: V) Allocator.Error!?V {
             const hash, var shard = self.lock(key, .write);
-            defer shard.unlock();
+            defer shard.unlock(.write);
             const old: ?V = if (shard.bucket.get(hash)) |v| v else null;
             try shard.bucket.put(self.allocator, hash, value);
             return old;
@@ -148,7 +154,7 @@ pub fn Dora(
 
         pub fn delete(self: *Self, key: K) bool {
             const hash, var shard = self.lock(key, .write);
-            defer shard.unlock();
+            defer shard.unlock(.write);
             const ent = shard.bucket.getEntry(hash) orelse return false;
             deinitValue(ent.value_ptr);
 
@@ -176,7 +182,8 @@ pub fn Dora(
 
         inline fn deinitValue(value: *V) void {
             if (comptime @hasDecl(Context, "deinit")) {
-                Context.deinit(value);
+                // Like `hash` and `eql`, contexts are assumed to be stateless.
+                Context.deinit(undefined, value.*);
             }
         }
 
@@ -189,7 +196,7 @@ pub fn Dora(
                 if (@hasDecl(Context, "deinit")) {
                     var iter = shard.bucket.valueIterator();
                     while (iter.next()) |value| {
-                        Context.deinit(value);
+                        deinitValue(value);
                     }
                 }
                 shard.bucket.deinit(self.allocator);
@@ -229,54 +236,59 @@ pub fn Dora(
         const Shard = struct {
             bucket: Bucket = .{},
             _lock: RwLock = .{},
-            /// Is this shard locked, how, and by who? When multiple threads
-            /// are sharing a read lock, the last one to obtain it is recorded.
+            /// Is this shard write-locked, and by whom? Only writers record
+            /// themselves here. Many readers can hold the lock at once, and
+            /// having them all write to this field would be a data race.
             _state: DebugState = if (is_safe) .unlocked else {},
             const is_safe = std.debug.runtime_safety or builtin.is_test;
 
             /// This is a ZST in fast/smol release builds.
             const DebugState = if (!is_safe) void else union(enum) {
                 unlocked: void,
-                locked: struct { state: util.RW, owner: u64 },
+                write_locked: struct { owner: std.Thread.Id },
             };
 
             pub inline fn lock(self: *Shard, comptime ty: util.RW) void {
-                if (comptime ty == .write) {
-                    self._lock.lock();
-                } else {
-                    self._lock.lockShared();
-                }
-                if (is_safe) {
-                    assert(self._state == .unlocked);
-                    self._state = .{
-                        .locked = .{ .owner = std.Thread.getCurrentId(), .state = ty },
-                    };
+                switch (ty) {
+                    .write => {
+                        self._lock.lock();
+                        if (is_safe) {
+                            assert(self._state == .unlocked);
+                            self._state = .{ .write_locked = .{ .owner = std.Thread.getCurrentId() } };
+                        }
+                    },
+                    .read => {
+                        self._lock.lockShared();
+                        if (is_safe) assert(self._state == .unlocked);
+                    },
                 }
             }
 
-            pub inline fn unlock(self: *@This()) void {
-                self._lock.unlock();
-                if (is_safe) {
-                    assert(self._state == .locked);
-                    assert(self._state.locked.owner == std.Thread.getCurrentId());
-                    self._state = .unlocked;
+            pub inline fn unlock(self: *@This(), comptime ty: util.RW) void {
+                switch (ty) {
+                    .write => {
+                        self.assertCurrentThreadWritable();
+                        if (is_safe) self._state = .unlocked;
+                        self._lock.unlock();
+                    },
+                    .read => {
+                        if (is_safe) assert(self._state == .unlocked);
+                        self._lock.unlockShared();
+                    },
                 }
             }
 
             inline fn assertCurrentThreadWritable(self: *Shard) void {
                 if (is_safe) {
-                    assert(self._state == .locked);
-                    assert(self._state.locked.state == .write);
-                    assert(self._state.locked.owner == std.Thread.getCurrentId());
+                    assert(self._state == .write_locked);
+                    assert(self._state.write_locked.owner == std.Thread.getCurrentId());
                 }
             }
 
+            /// Readers are not tracked individually, so this can only check
+            /// that no writer holds the shard.
             inline fn assertCurrentThreadReadable(self: *Shard) void {
-                if (is_safe) {
-                    assert(self._state == .locked);
-                    assert(self._state.locked.state == .read);
-                    assert(self._state.locked.owner == std.Thread.getCurrentId());
-                }
+                if (is_safe) assert(self._state == .unlocked);
             }
         };
 
@@ -287,7 +299,25 @@ pub fn Dora(
         // we just skip the check.
         comptime {
             if (!builtin.is_test and builtin.mode != .Debug and @sizeOf(Shard) > cache_line) {
-                @compileError(std.fmt.comptimePrint("Shard is too large to fit in a cache line: {} > {}\n", .{ @sizeOf(Shard), cache_line }));
+                @compileError(
+                    std.fmt.comptimePrint(
+                        \\Shard is too large to fit in a cache line.
+                        \\- Cache line size: {}
+                        \\- Shard size: {}
+                        \\- Bucket size: {}
+                        \\- Lock size: {}
+                        \\- Lock kind: {s}
+                        \\
+                    ,
+                        .{
+                            cache_line,
+                            @sizeOf(Shard),
+                            @sizeOf(Bucket),
+                            @sizeOf(RwLock),
+                            @typeName(RwLock),
+                        },
+                    ),
+                );
             }
         }
 
@@ -299,7 +329,7 @@ pub fn Dora(
             value: *const V,
             shard: *Shard,
             pub fn release(self: *Ref) void {
-                self.shard.unlock();
+                self.shard.unlock(.read);
             }
         };
 
@@ -311,7 +341,7 @@ pub fn Dora(
             value: *V,
             shard: *Shard,
             pub fn release(self: *RefMut) void {
-                self.shard.unlock();
+                self.shard.unlock(.write);
             }
         };
 
@@ -320,11 +350,11 @@ pub fn Dora(
         /// ## Safety
         /// Failure to call `.release()` _will_ result in a deadlock.
         const Entry = struct {
-            key: *const K,
+            key: K,
             value: *const V,
             shard: *Shard,
             pub fn release(self: *Entry) void {
-                self.shard.unlock();
+                self.shard.unlock(.read);
             }
         };
 
@@ -333,11 +363,11 @@ pub fn Dora(
         /// ## Safety
         /// Failure to call `.release()` _will_ result in a deadlock.
         const EntryMut = struct {
-            key: *const K,
+            key: K,
             value: *V,
-            lock: *RwLock,
+            shard: *Shard,
             pub fn release(self: *EntryMut) void {
-                self.lock.unlock();
+                self.shard.unlock(.write);
             }
         };
     };
@@ -377,7 +407,7 @@ const util = @import("util.zig");
 const iters = @import("iter.zig");
 
 const Allocator = std.mem.Allocator;
-const RwLock = std.Thread.RwLock;
+const RwLock = @import("RwLock.zig").RwLock(.{});
 
 const assert = std.debug.assert;
 const cache_line = std.atomic.cache_line;

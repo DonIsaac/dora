@@ -53,7 +53,7 @@ pub fn ParIter(TDora: type, Context: type, comptime ty: util.RW) type {
 
         fn runOnShard(context: Context, shard: anytype) void {
             shard.lock(ty);
-            defer shard.unlock();
+            defer shard.unlock(ty);
 
             const bucket = &shard.bucket;
             var iter = bucket.iterator();
