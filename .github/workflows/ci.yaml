@@ -16,16 +16,35 @@ jobs:
       - name: Lint
         uses: DonIsaac/zlint-action@main
 
-  test:
+  check:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [native, x86-linux-musl]
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
       - name: Check
-        run: zig build check --summary all
+        run: zig build check -Dtarget=${{ matrix.target }} --summary all
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: native
+            flags: -Dtsan
+          # 32-bit. TSAN is unsupported here.
+          - target: x86-linux-musl
+            flags: ""
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
       - name: Test
-        run: zig build test -Dtsan --summary all
-
-
+        run: zig build test -Dtarget=${{ matrix.target }} ${{ matrix.flags }} --summary all

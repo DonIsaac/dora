@@ -88,7 +88,7 @@ pub fn Dora(
             assert(shard_amount > 1);
             assert(util.isPowerOfTwo(shard_amount));
 
-            const shift = @as(u32, util.ptrSizeBits) - @ctz(shard_amount);
+            const shift = @as(u32, @bitSizeOf(Hash)) - @ctz(shard_amount);
 
             const actual_capacity = if (capacity != 0)
                 (capacity + (shard_amount - 1)) & ~(shard_amount - 1)
@@ -247,7 +247,7 @@ pub fn Dora(
 
         fn determineShard(self: *const Self, hash: Hash) usize {
             // Leave the high 7 bits for the HashBrown SIMD tag.
-            return (hash << 7) >> self.shift;
+            return @intCast((hash << 7) >> self.shift);
         }
 
         inline fn getShards(self: *Self) []Shard {
@@ -522,4 +522,15 @@ test Dora {
         try expectEqual(2, ref.value.*);
     }
     try expectEqual(2, map.getCopy(1));
+}
+
+test "Dora.determineShard" {
+    const Map = Dora(u32, u32, std.hash_map.AutoContext(u32), .{
+        .max_load_percentage = std.hash_map.default_max_load_percentage,
+        .store_hash = false,
+    });
+    var map = try Map.initCapacityAndShardAmount(t.allocator, 0, 64);
+    defer map.deinit();
+    try expectEqual(0, map.determineShard(0));
+    try expectEqual(63, map.determineShard(std.math.maxInt(Hash)));
 }
