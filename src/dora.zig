@@ -85,10 +85,12 @@ pub fn Dora(
             capacity: usize,
             shard_amount: u32,
         ) Allocator.Error!Self {
-            assert(shard_amount > 1);
+            assert(shard_amount > 0);
             assert(util.isPowerOfTwo(shard_amount));
 
-            const shift = @as(u32, @bitSizeOf(Hash)) - @ctz(shard_amount);
+            // One less than the full shift, so a single shard does not need
+            // a shift of 64. `determineShard` shifts right by 1 first.
+            const shift = @as(u32, @bitSizeOf(Hash) - 1) - @ctz(shard_amount);
 
             const actual_capacity = if (capacity != 0)
                 (capacity + (shard_amount - 1)) & ~(shard_amount - 1)
@@ -247,7 +249,7 @@ pub fn Dora(
 
         fn determineShard(self: *const Self, hash: Hash) usize {
             // Leave the high 7 bits for the HashBrown SIMD tag.
-            return @intCast((hash << 7) >> self.shift);
+            return @intCast(((hash << 7) >> 1) >> self.shift);
         }
 
         inline fn getShards(self: *Self) []Shard {
@@ -536,4 +538,19 @@ test "Dora.determineShard" {
     // Only bits 51-56 select the shard.
     try expectEqual(63, map.determineShard(0x3F << 51));
     try expectEqual(0, map.determineShard((1 << 57) | 0xFFFF));
+}
+
+test "Dora with one shard" {
+    const Map = Dora(u32, u32, std.hash_map.AutoContext(u32), .{
+        .max_load_percentage = std.hash_map.default_max_load_percentage,
+        .store_hash = false,
+    });
+    var map = try Map.initCapacityAndShardAmount(t.allocator, 16, 1);
+    defer map.deinit();
+    try expectEqual(0, map.determineShard(0));
+    try expectEqual(0, map.determineShard(std.math.maxInt(Hash)));
+
+    for (0..100) |i| try map.insert(@intCast(i), @intCast(i * 2));
+    try expectEqual(100, map.sizeSlow());
+    try expectEqual(84, map.getCopy(42));
 }

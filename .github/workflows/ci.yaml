@@ -41,6 +41,8 @@ jobs:
           # 32-bit. TSAN is unsupported here.
           - target: x86-linux-musl
             flags: ""
+          - target: native
+            flags: -Dsingle-threaded
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
