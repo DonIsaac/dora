@@ -4,8 +4,26 @@ pub fn AutoDora(
     comptime K: type,
     comptime V: type,
 ) type {
-    return Dora(K, V, std.hash_map.AutoContext(K), std.hash_map.default_max_load_percentage);
+    return Dora(
+        K,
+        V,
+        std.hash_map.AutoContext(K),
+        .{
+            .max_load_percentage = std.hash_map.default_max_load_percentage,
+            .store_hash = defaultStoreHash(K),
+        },
+    );
 }
+
+const Options = struct {
+    max_load_percentage: u64,
+    /// Store each key's hash next to it. Growing a shard then reuses stored
+    /// hashes instead of calling `Context.hash` on every entry, at the cost
+    /// of 8 bytes (plus padding) per entry. Lookups never rehash either way:
+    /// the hash used to pick a shard is reused within it.
+    /// See `defaultStoreHash` for a reasonable default.
+    store_hash: bool,
+};
 
 /// ## Contexts
 /// Context has the following interface:
@@ -20,11 +38,14 @@ pub fn AutoDora(
 pub fn Dora(
     /// Key type. Will not be freed when entries are removed, so it should not
     /// own any allocations. It should also be relatively small, since it will
-    /// be copied frequently.
+    /// be copied frequently and each entry stores a copy.
+    ///
+    /// Keys are stored, so any memory a key refers to (e.g. a slice's bytes)
+    /// must stay valid and unchanged until its entry is removed.
     comptime K: type,
     comptime V: type,
     comptime Context: type,
-    comptime max_load_percentage: u64,
+    comptime options: Options,
 ) type {
     if (!@hasDecl(Context, "hash") or !@hasDecl(Context, "eql")) {
         @compileError("Context must have hash and eql functions");
@@ -37,6 +58,8 @@ pub fn Dora(
             else => @compileError("Context.deinit must be a function"),
         }
     }
+    if (options.max_load_percentage <= 0 or options.max_load_percentage >= 100)
+        @compileError("max_load_percentage must be between 0 and 100.");
 
     return struct {
         // not using slice to save a word
@@ -95,7 +118,7 @@ pub fn Dora(
 
         pub fn get(self: *Self, key: K) ?Ref {
             const hash, var shard = self.lock(key, .read);
-            if (shard.bucket.getPtr(hash)) |value| {
+            if (shard.bucket.getPtrAdapted(key, Adapter{ .key_hash = hash })) |value| {
                 return Ref{ .value = value, .shard = shard };
             } else {
                 shard.unlock(.read);
@@ -106,7 +129,7 @@ pub fn Dora(
         pub fn getCopy(self: *Self, key: K) ?V {
             const hash, var shard = self.lock(key, .read);
             defer shard.unlock(.read);
-            return shard.bucket.get(hash);
+            return shard.bucket.getAdapted(key, Adapter{ .key_hash = hash });
         }
 
         /// Get a mutable reference to the entry stored under `key`, if any.
@@ -115,7 +138,7 @@ pub fn Dora(
         /// `.release()` on the returned entry.
         pub fn entry(self: *Self, key: K) ?EntryMut {
             const hash, var shard = self.lock(key, .write);
-            if (shard.bucket.getPtr(hash)) |value| {
+            if (shard.bucket.getPtrAdapted(key, Adapter{ .key_hash = hash })) |value| {
                 return EntryMut{ .key = key, .value = value, .shard = shard };
             } else {
                 shard.unlock(.write);
@@ -137,9 +160,11 @@ pub fn Dora(
         pub fn insert(self: *Self, key: K, value: V) Allocator.Error!void {
             const hash, var shard = self.lock(key, .write);
             shard.assertCurrentThreadWritable();
-            // assert(shard.)
             defer shard.unlock(.write);
-            try shard.bucket.putNoClobber(self.allocator, hash, value);
+            const gop = try shard.bucket.getOrPutAdapted(self.allocator, key, Adapter{ .key_hash = hash });
+            assert(!gop.found_existing);
+            gop.key_ptr.* = StoredKey.init(hash, key);
+            gop.value_ptr.* = value;
         }
 
         /// Insert an entry under `key` if no entry exists, otherwise update the existing
@@ -149,15 +174,18 @@ pub fn Dora(
         pub fn put(self: *Self, key: K, value: V) Allocator.Error!?V {
             const hash, var shard = self.lock(key, .write);
             defer shard.unlock(.write);
-            const old: ?V = if (shard.bucket.get(hash)) |v| v else null;
-            try shard.bucket.put(self.allocator, hash, value);
+            const gop = try shard.bucket.getOrPutAdapted(self.allocator, key, Adapter{ .key_hash = hash });
+            // Like `std.HashMap.put`, an existing entry keeps its stored key.
+            const old: ?V = if (gop.found_existing) gop.value_ptr.* else null;
+            if (!gop.found_existing) gop.key_ptr.* = StoredKey.init(hash, key);
+            gop.value_ptr.* = value;
             return old;
         }
 
         pub fn delete(self: *Self, key: K) bool {
             const hash, var shard = self.lock(key, .write);
             defer shard.unlock(.write);
-            const ent = shard.bucket.getEntry(hash) orelse return false;
+            const ent = shard.bucket.getEntryAdapted(key, Adapter{ .key_hash = hash }) orelse return false;
             deinitValue(ent.value_ptr);
 
             shard.bucket.removeByPtr(ent.key_ptr);
@@ -226,9 +254,58 @@ pub fn Dora(
             return self.shards[0..self.shard_count];
         }
 
-        // our wrappers compute key hashes themselves. we just forward hashes to the
-        // underlying map
-        const Bucket = std.HashMapUnmanaged(Hash, V, IdentityContext, max_load_percentage);
+        /// What each shard's map stores as its key. Without `store_hash`,
+        /// `hash` is zero-sized and this is laid out exactly like `K`.
+        const StoredKey = struct {
+            hash: if (options.store_hash) Hash else void,
+            key: K,
+
+            inline fn init(hash: Hash, key: K) StoredKey {
+                return .{ .hash = if (options.store_hash) hash else {}, .key = key };
+            }
+
+            comptime {
+                if (!options.store_hash) assert(@sizeOf(StoredKey) == @sizeOf(K));
+            }
+
+            /// With `store_hash`, differing hashes skip calling `Context.eql`.
+            inline fn eql(a: StoredKey, b: StoredKey) bool {
+                // Like `hash`, contexts are assumed to be stateless.
+                return (!options.store_hash or a.hash == b.hash) and Context.eql(undefined, a.key, b.key);
+            }
+        };
+
+        /// Context the shard maps use on their own, i.e. when growing. With
+        /// `store_hash` it reuses the stored hash. Otherwise it rehashes the
+        /// key, which gives the same hash `lock` computed for it.
+        const BucketContext = struct {
+            pub fn hash(_: BucketContext, s: StoredKey) Hash {
+                return if (options.store_hash) s.hash else Context.hash(undefined, s.key);
+            }
+            pub fn eql(_: BucketContext, a: StoredKey, b: StoredKey) bool {
+                return a.eql(b);
+            }
+        };
+
+        /// Context for lookups and inserts: carries the hash `lock` already
+        /// computed to pick the shard, so the key is hashed once per call.
+        const Adapter = struct {
+            key_hash: Hash,
+            pub fn hash(self: Adapter, _: K) Hash {
+                return self.key_hash;
+            }
+            pub fn eql(self: Adapter, key: K, stored: StoredKey) bool {
+                return StoredKey.init(self.key_hash, key).eql(stored);
+            }
+        };
+
+        const Bucket = std.HashMapUnmanaged(
+            StoredKey,
+            V,
+            BucketContext,
+            options.max_load_percentage,
+        );
+
         /// Shards are a hash map protected by a rw lock.
         ///
         /// A key's hash determines which shard it belongs to. Operations on
@@ -377,14 +454,14 @@ pub fn Dora(
     };
 }
 
-const IdentityContext = struct {
-    pub fn hash(_: IdentityContext, key: Hash) Hash {
-        return key;
-    }
-    pub fn eql(_: IdentityContext, a: Hash, b: Hash) bool {
-        return a == b;
-    }
-};
+/// Picks a default `store_hash` for `K`. Returns `true` for slices and keys
+/// larger than 8 bytes, which are slow to rehash.
+pub fn defaultStoreHash(comptime K: type) bool {
+    return switch (@typeInfo(K)) {
+        .pointer => |p| p.size == .slice,
+        else => @sizeOf(K) > @sizeOf(Hash),
+    };
+}
 
 fn defaultShardAmount() u32 {
     if (comptime builtin.single_threaded) return 1;
@@ -431,7 +508,7 @@ test Dora {
         u32,
         u32,
         std.hash_map.AutoContext(u32),
-        std.hash_map.default_max_load_percentage,
+        .{ .max_load_percentage = std.hash_map.default_max_load_percentage, .store_hash = false },
     );
     var map = try Map.initCapacity(t.allocator, 16);
     defer map.deinit();
