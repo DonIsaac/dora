@@ -533,4 +533,7 @@ test "Dora.determineShard" {
     defer map.deinit();
     try expectEqual(0, map.determineShard(0));
     try expectEqual(63, map.determineShard(std.math.maxInt(Hash)));
+    // Only bits 51-56 select the shard.
+    try expectEqual(63, map.determineShard(0x3F << 51));
+    try expectEqual(0, map.determineShard((1 << 57) | 0xFFFF));
 }

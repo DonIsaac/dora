@@ -13,8 +13,6 @@ pub inline fn debugAssert(cond: bool, message: []const u8) void {
     }
 }
 
-pub const ptrSizeBits: comptime_int = builtin.target.ptrBitWidth();
-
 /// TODO: compare to `std.math.isPowerOfTwo`. This uses an intrinsic instead
 /// of calculating manually.
 pub inline fn isPowerOfTwo(x: anytype) bool {
@@ -64,10 +62,6 @@ fn assertInt(T: type) void {
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
-test ptrSizeBits {
-    try expectEqual(builtin.target.ptrBitWidth(), ptrSizeBits);
-    try expectEqual(@sizeOf(usize) * 8, ptrSizeBits);
-}
 test isPowerOfTwo {
     try expect(isPowerOfTwo(1));
     try expect(isPowerOfTwo(2));
