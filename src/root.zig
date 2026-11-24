@@ -3,6 +3,7 @@ const dora = @import("dora.zig");
 
 pub const Dora = dora.Dora;
 pub const AutoDora = dora.AutoDora;
+pub const defaultStoreHash = dora.defaultStoreHash;
 
 test {
     _ = Dora;
