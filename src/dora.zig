@@ -76,11 +76,13 @@ pub fn Dora(
 
             var shards = try allocator.alignedAlloc(Shard, .fromByteUnits(cache_line), shard_amount);
             errdefer allocator.free(shards);
+            @memset(shards, Shard{});
 
-            for (0..shard_amount) |i| {
-                shards[i] = .{};
-                var shard = &shards[i];
-                try shard.bucket.ensureTotalCapacity(allocator, cps);
+            if (capacity > 0) {
+                for (0..shard_amount) |i| {
+                    var shard = &shards[i];
+                    try shard.bucket.ensureTotalCapacity(allocator, cps);
+                }
             }
 
             return Self{
@@ -232,8 +234,8 @@ pub fn Dora(
         /// A key's hash determines which shard it belongs to. Operations on
         /// keys that belong to different shards can be done concurrently.
         const Shard = struct {
-            bucket: Bucket = .{},
-            _lock: RwLock = .{},
+            bucket: Bucket = .empty,
+            _lock: RwLock = .init,
             /// Is this shard write-locked, and by whom? Only writers record
             /// themselves here. Many readers can hold the lock at once, and
             /// having them all write to this field would be a data race.
