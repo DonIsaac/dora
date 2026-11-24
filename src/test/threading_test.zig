@@ -18,8 +18,7 @@ fn writeInts(map: *IntMap) void {
 test ".put() write contention on the same keys" {
     // #threads \in [1, 4]
     const thread_count: u32 = @min(@max(1, std.Thread.getCpuCount() catch 1), 4);
-    // Shard amount must be a power of two greater than 1, so it can't track
-    // the thread count.
+    // Shard amount must be a power of two, so it can't track the thread count.
     var map = try IntMap.initCapacityAndShardAmount(t.allocator, 0, 4);
     defer map.deinit();
 
