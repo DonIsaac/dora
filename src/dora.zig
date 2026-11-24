@@ -65,7 +65,7 @@ pub fn Dora(
         // not using slice to save a word
         shards: [*]align(cache_line) Shard,
         shard_count: u32,
-        shift: u6,
+        shift: std.math.Log2Int(Hash),
         allocator: Allocator,
 
         const Self = @This();
@@ -90,7 +90,7 @@ pub fn Dora(
 
             // One less than the full shift, so a single shard does not need
             // a shift of 64. `determineShard` shifts right by 1 first.
-            const shift = @as(u32, @bitSizeOf(Hash) - 1) - @ctz(shard_amount);
+            const shift: std.math.Log2Int(Hash) = @intCast(@bitSizeOf(Hash) - 1 - @ctz(shard_amount));
 
             const actual_capacity = if (capacity != 0)
                 (capacity + (shard_amount - 1)) & ~(shard_amount - 1)
@@ -113,7 +113,7 @@ pub fn Dora(
             return Self{
                 .shards = @ptrCast(shards),
                 .shard_count = shard_amount,
-                .shift = @intCast(shift),
+                .shift = shift,
                 .allocator = allocator,
             };
         }
